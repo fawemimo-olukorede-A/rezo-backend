@@ -18,7 +18,7 @@ const REZO_API_URL = process.env.REZO_API_URL || 'http://localhost:3000';
 // Postilion-specific settings
 const USE_ASCII_LENGTH_HEADER = process.env.ASCII_LENGTH || false;  // Set true if Postilion uses ASCII length
 const HEADER_LENGTH = 2;  // 2-byte header (change to 4 if Postilion uses 4-byte)
-const LOG_RAW_DATA = process.env.LOG_RAW || false;  // Set true to debug raw hex data
+const LOG_RAW_DATA = process.env.LOG_RAW || true;  // Set true to debug raw hex data
 
 // ============= ISO 8583 FIELD DEFINITIONS =============
 
@@ -233,12 +233,39 @@ function toBlockchainTx(msg) {
     const txType = PROCESSING_CODES[processingCode] || 'PURCHASE';
     const amount = parseInt(f[4] || '0') / 100;
 
+    // Extract acquirer - try multiple fields
+    // Field 32 = Acquiring Institution ID
+    // Field 33 = Forwarding Institution ID (sometimes used as acquirer)
+    // Field 42 = Card Acceptor ID (first 3-4 chars sometimes contain bank code)
+    let acquirerCode = f[32] || f[33] || '';
+    if (!acquirerCode || acquirerCode === '0' || acquirerCode.trim() === '') {
+        // Try to extract from terminal ID or merchant ID
+        acquirerCode = 'ISW';  // Default to Interswitch if not specified
+    }
+    acquirerCode = acquirerCode.trim();
+
+    // Extract issuer - try multiple fields
+    // Field 100 = Receiving Institution ID
+    // Can also try to derive from PAN (BIN lookup)
+    let issuerCode = f[100] || '';
+    if (!issuerCode || issuerCode.trim() === '') {
+        // Try to get issuer from PAN BIN (first 6 digits)
+        const pan = f[2] || '';
+        if (pan.length >= 6) {
+            const bin = pan.substring(0, 6);
+            issuerCode = getBankFromBIN(bin) || 'UNKNOWN';
+        } else {
+            issuerCode = 'UNKNOWN';
+        }
+    }
+    issuerCode = issuerCode.trim();
+
     return {
         rrn: f[37] || '',
         stan: f[11] || '',
         maskedPan: maskPAN(f[2]),
-        acquirerCode: f[32] || '',
-        issuerCode: f[100] || '',
+        acquirerCode: acquirerCode,
+        issuerCode: issuerCode,
         terminalId: f[41] || '',
         merchantId: f[42] || '',
         merchantName: f[43] || '',
@@ -253,8 +280,56 @@ function toBlockchainTx(msg) {
             transmissionDateTime: f[7],
             merchantType: f[18],
             posEntryMode: f[22],
+            originalAcquirer: f[32],
+            originalIssuer: f[100],
         }),
     };
+}
+
+/**
+ * Get bank code from BIN (first 6 digits of PAN)
+ * Nigerian bank BIN ranges
+ */
+function getBankFromBIN(bin) {
+    const binRanges = {
+        // Mastercard Nigeria ranges
+        '539983': '058',  // GTBank
+        '539941': '058',  // GTBank
+        '544937': '044',  // Access Bank
+        '544927': '044',  // Access Bank
+        '531083': '057',  // Zenith Bank
+        '531995': '057',  // Zenith Bank
+        '519911': '033',  // UBA
+        '519940': '033',  // UBA
+        '530988': '011',  // First Bank
+        '539117': '011',  // First Bank
+        '530220': '070',  // Fidelity Bank
+        '506105': '214',  // FCMB
+        '506106': '214',  // FCMB
+        '506107': '232',  // Sterling
+        // Visa Nigeria ranges
+        '405633': '058',  // GTBank Visa
+        '408019': '044',  // Access Visa
+        '428623': '057',  // Zenith Visa
+        '466498': '033',  // UBA Visa
+    };
+
+    // Check exact match first
+    if (binRanges[bin]) return binRanges[bin];
+
+    // Check prefix matches (first 4-5 digits)
+    for (const [prefix, bank] of Object.entries(binRanges)) {
+        if (bin.startsWith(prefix.substring(0, 4))) {
+            return bank;
+        }
+    }
+
+    // Default mappings based on card type
+    if (bin.startsWith('5')) return 'MASTERCARD';  // Mastercard
+    if (bin.startsWith('4')) return 'VISA';        // Visa
+    if (bin.startsWith('506')) return 'VERVE';     // Verve
+
+    return null;
 }
 
 async function logToBlockchain(tx) {
