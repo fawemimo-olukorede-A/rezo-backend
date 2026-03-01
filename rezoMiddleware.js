@@ -185,8 +185,11 @@ const pendingTransactions = new Map();
 
 function getTransactionKey(msg) {
     const f = msg.fields;
-    // Use STAN + RRN + Amount as unique key
-    return `${f[11]}-${f[37]}-${f[4]}`;
+    // Use STAN + Transmission DateTime + Amount as unique key
+    // (RRN can be parsed differently in response due to bitmap variations)
+    const key = `${f[11]}-${f[7]}-${f[4]}`;
+    debug('KEY', `Transaction key: ${key}`);
+    return key;
 }
 
 // ============= BLOCKCHAIN LOGGING =============
