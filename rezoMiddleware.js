@@ -93,25 +93,86 @@ const FIELD_SPECS = {
 const PROCESSING_CODES = {
     '00': 'PURCHASE',
     '01': 'WITHDRAWAL',
-    '09': 'PURCHASE',
+    '09': 'PURCHASE_CASHBACK',
     '20': 'REFUND',
+    '21': 'DEPOSIT',
     '30': 'BALANCE_INQUIRY',
     '31': 'BALANCE_INQUIRY',
     '40': 'TRANSFER',
+    '50': 'PAYMENT',
 };
 
 const RESPONSE_CODES = {
-    '00': 'Approved',
-    '01': 'Refer to issuer',
+    '00': 'Approved or completed successfully',
+    '01': 'Refer to card issuer',
+    '02': 'Refer to card issuer, special condition',
+    '03': 'Invalid merchant',
+    '04': 'Pick-up card',
     '05': 'Do not honor',
+    '06': 'Error',
+    '07': 'Pick-up card, special condition',
+    '08': 'Honor with identification',
+    '10': 'Approved, partial',
+    '11': 'Approved, VIP',
     '12': 'Invalid transaction',
     '13': 'Invalid amount',
     '14': 'Invalid card number',
-    '51': 'Insufficient funds',
+    '17': 'Customer cancellation',
+    '24': 'File update not supported',
+    '25': 'Unable to locate record',
+    '27': 'File update field edit error',
+    '29': 'File update failed',
+    '30': 'Format error',
+    '32': 'Completed partially',
+    '33': 'Expired card, pick-up',
+    '34': 'Suspected fraud, pick-up',
+    '38': 'PIN tries exceeded, pick-up',
+    '40': 'Function not supported',
+    '41': 'Lost card, pick-up',
+    '42': 'No universal account',
+    '43': 'Stolen card, pick-up',
+    '44': 'No investment account',
+    '48': 'No customer record',
+    '51': 'Not sufficient funds',
+    '52': 'No check account',
+    '53': 'No savings account',
     '54': 'Expired card',
     '55': 'Incorrect PIN',
-    '91': 'Issuer unavailable',
+    '56': 'No card record',
+    '57': 'Transaction not permitted to cardholder',
+    '58': 'Transaction not permitted on terminal',
+    '59': 'Suspected fraud',
+    '60': 'Contact acquirer',
+    '61': 'Exceeds withdrawal limit',
+    '62': 'Restricted card',
+    '63': 'Security violation',
+    '65': 'Exceeds withdrawal frequency',
+    '68': 'Response received too late',
+    '70': 'Dynamic Currency Conversion offer',
+    '75': 'PIN tries exceeded',
+    '77': 'Intervene, bank approval required',
+    '78': 'Intervene, bank approval required for partial amount',
+    '90': 'Cut-off in progress',
+    '91': 'Issuer or switch inoperative',
+    '92': 'Routing error',
+    '93': 'Violation of law',
+    '94': 'Duplicate transaction',
+    '95': 'Reconcile error',
     '96': 'System malfunction',
+    '98': 'Exceeds cash limit',
+    'A1': 'ATC not incremented',
+    'A2': 'ATC limit exceeded',
+    'A3': 'ATC configuration error',
+    'A4': 'CVR check failure',
+    'A6': 'TVR check failure',
+    'C0': 'Unacceptable PIN',
+    'C1': 'PIN change failed',
+    'C2': 'PIN unblock failed',
+    'D1': 'MAC error',
+    'Y1': 'Offline approved',
+    'Y3': 'Unable to go online, approved',
+    'Z1': 'Offline declined',
+    'Z3': 'Unable to go online, declined',
 };
 
 function parseMessage(buffer) {
@@ -194,7 +255,7 @@ function getTransactionKey(msg) {
 
 // ============= BLOCKCHAIN LOGGING =============
 
-async function logToBlockchain(request, response) {
+async function logToBlockchain(request, response, originalRRN) {
     const reqFields = request.fields;
     const resFields = response.fields;
 
@@ -202,6 +263,9 @@ async function logToBlockchain(request, response) {
     const txType = PROCESSING_CODES[processingCode] || 'PURCHASE';
     const amount = parseInt(reqFields[4] || '0') / 100;
     const responseCode = resFields[39] || 'XX';
+
+    // Use original RRN from request (issuer response may have parsing issues)
+    const rrn = originalRRN || reqFields[37] || '';
 
     // Determine acquirer and issuer
     let acquirerCode = reqFields[32] || '';
@@ -214,7 +278,7 @@ async function logToBlockchain(request, response) {
     }
 
     const tx = {
-        rrn: reqFields[37] || '',
+        rrn: rrn,
         stan: reqFields[11] || '',
         maskedPan: maskPAN(reqFields[2]),
         acquirerCode: acquirerCode.trim(),
@@ -394,8 +458,13 @@ class ProxySession {
             console.log(`  Merchant: ${(f[43] || 'N/A').trim()}`);
 
             // Store request for matching with response
+            // Also store the original RRN since issuer response may parse it differently
             const key = getTransactionKey(msg);
-            pendingTransactions.set(key, { request: msg, timestamp: Date.now() });
+            pendingTransactions.set(key, {
+                request: msg,
+                originalRRN: f[37] || '',
+                timestamp: Date.now()
+            });
         }
 
         // Forward to Issuer
@@ -455,16 +524,18 @@ class ProxySession {
             const pending = pendingTransactions.get(key);
 
             if (pending) {
-                console.log(`[Response] ${RESPONSE_CODES[f[39]] || 'Unknown'}`);
+                console.log(`[Response] ${RESPONSE_CODES[f[39]] || 'Unknown'} (${f[39]})`);
 
                 // *** THIS IS THE KEY MOMENT ***
                 // Both request and response are now available
                 // Log to blockchain with issuer's confirmation
-                await logToBlockchain(pending.request, msg);
+                await logToBlockchain(pending.request, msg, pending.originalRRN);
 
                 pendingTransactions.delete(key);
             } else {
                 console.log(`[Response] No matching request found`);
+                debug('MATCH', `Looking for key: ${key}`);
+                debug('MATCH', `Available keys: ${Array.from(pendingTransactions.keys()).join(', ')}`);
             }
         }
 
