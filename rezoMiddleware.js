@@ -277,6 +277,10 @@ async function logToBlockchain(request, response, originalRRN) {
         issuerCode = getBankFromBIN(pan.substring(0, 6)) || 'UNKNOWN';
     }
 
+    // Determine transaction status
+    const isApproved = responseCode === '00' || responseCode === '10' || responseCode === '11';
+    const status = isApproved ? 'APPROVED' : 'DECLINED';
+
     const tx = {
         rrn: rrn,
         stan: reqFields[11] || '',
@@ -291,24 +295,27 @@ async function logToBlockchain(request, response, originalRRN) {
         txType: txType,
         authCode: resFields[38] || '',
         responseCode: responseCode,
+        status: status,
         metadata: JSON.stringify({
             requestMTI: request.mti,
             responseMTI: response.mti,
             processingCode: reqFields[3],
             issuerConfirmed: true,
             responseDescription: RESPONSE_CODES[responseCode] || 'Unknown',
+            status: status,
         }),
     };
 
     try {
         const result = await axios.post(`${REZO_API_URL}/transactions`, tx);
-        console.log(`[Blockchain] ✓ RECORDED`);
+        const statusIcon = isApproved ? '✓' : '✗';
+        console.log(`[Blockchain] ${statusIcon} RECORDED - ${status}`);
         console.log(`             RRN: ${tx.rrn}`);
         console.log(`             Type: ${tx.txType}`);
         console.log(`             Amount: ₦${tx.amount.toLocaleString()}`);
         console.log(`             Flow: ${tx.acquirerCode} → ${tx.issuerCode}`);
         console.log(`             Response: ${responseCode} (${RESPONSE_CODES[responseCode] || 'Unknown'})`);
-        console.log(`             Issuer Confirmed: ✓`);
+        console.log(`             Status: ${status}`);
         return result.data;
     } catch (err) {
         console.error(`[Blockchain] ✗ Error: ${err.message}`);
