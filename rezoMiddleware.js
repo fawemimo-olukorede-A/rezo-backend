@@ -30,9 +30,27 @@ const ISSUER_PORT = process.env.ISSUER_PORT || 4534;              // Issuer Port
 const REZO_API_URL = process.env.REZO_API_URL || 'http://localhost:3000';
 
 // Settings
-const LOG_RAW_DATA = process.env.LOG_RAW || false;
+const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+const LOG_RAW_DATA = process.env.LOG_RAW === 'true' || process.env.LOG_RAW === '1';
 const ISSUER_CONNECT_TIMEOUT = 10000;  // 10 seconds
 const ISSUER_RECONNECT_INTERVAL = 5000;
+
+// Debug logger
+function debug(category, message, data = null) {
+    if (!DEBUG) return;
+    const timestamp = new Date().toISOString();
+    console.log(`[DEBUG ${timestamp}] [${category}] ${message}`);
+    if (data) {
+        if (Buffer.isBuffer(data)) {
+            console.log(`  HEX: ${data.toString('hex')}`);
+            console.log(`  LEN: ${data.length} bytes`);
+        } else if (typeof data === 'object') {
+            console.log(`  DATA: ${JSON.stringify(data, null, 2)}`);
+        } else {
+            console.log(`  DATA: ${data}`);
+        }
+    }
+}
 
 // ============= ISO 8583 PARSING =============
 
@@ -266,59 +284,78 @@ class ProxySession {
 
     connectToIssuer() {
         this.log(`Connecting to Issuer ${ISSUER_HOST}:${ISSUER_PORT}...`);
+        debug('ISSUER', `Initiating connection to ${ISSUER_HOST}:${ISSUER_PORT}`);
 
         this.issuerSocket = new net.Socket();
         this.issuerSocket.setTimeout(ISSUER_CONNECT_TIMEOUT);
 
         this.issuerSocket.connect(ISSUER_PORT, ISSUER_HOST, () => {
             this.log(`Connected to Issuer ✓`);
+            debug('ISSUER', `Connection established successfully`);
+            debug('ISSUER', `Local address: ${this.issuerSocket.localAddress}:${this.issuerSocket.localPort}`);
             this.isConnectedToIssuer = true;
             this.issuerSocket.setTimeout(0);
 
             // Send any pending messages
             while (this.pendingMessages.length > 0) {
                 const msg = this.pendingMessages.shift();
+                debug('ISSUER', `Sending queued message`, msg);
                 this.forwardToIssuer(msg);
             }
         });
 
-        this.issuerSocket.on('data', (data) => this.handleIssuerData(data));
+        this.issuerSocket.on('data', (data) => {
+            debug('ISSUER', `Received data from Issuer`, data);
+            this.handleIssuerData(data);
+        });
 
         this.issuerSocket.on('error', (err) => {
             this.log(`Issuer connection error: ${err.message}`);
+            debug('ISSUER', `Connection error: ${err.code} - ${err.message}`);
+            debug('ISSUER', `Error details`, { code: err.code, errno: err.errno, syscall: err.syscall });
         });
 
-        this.issuerSocket.on('close', () => {
+        this.issuerSocket.on('close', (hadError) => {
             this.log(`Issuer connection closed`);
+            debug('ISSUER', `Connection closed, hadError: ${hadError}`);
             this.isConnectedToIssuer = false;
         });
 
         this.issuerSocket.on('timeout', () => {
             this.log(`Issuer connection timeout`);
+            debug('ISSUER', `Connection timeout after ${ISSUER_CONNECT_TIMEOUT}ms`);
             this.issuerSocket.destroy();
         });
     }
 
     setupAcquirerHandlers() {
-        this.acquirerSocket.on('data', (data) => this.handleAcquirerData(data));
+        this.acquirerSocket.on('data', (data) => {
+            debug('ACQUIRER', `Received data from Acquirer/Postilion`, data);
+            this.handleAcquirerData(data);
+        });
 
-        this.acquirerSocket.on('close', () => {
+        this.acquirerSocket.on('close', (hadError) => {
             this.log(`Acquirer disconnected`);
+            debug('ACQUIRER', `Connection closed, hadError: ${hadError}`);
             if (this.issuerSocket) this.issuerSocket.destroy();
         });
 
         this.acquirerSocket.on('error', (err) => {
             this.log(`Acquirer error: ${err.message}`);
+            debug('ACQUIRER', `Error: ${err.code} - ${err.message}`);
         });
     }
 
     handleAcquirerData(data) {
         this.acquirerBuffer = Buffer.concat([this.acquirerBuffer, data]);
+        debug('BUFFER', `Acquirer buffer size: ${this.acquirerBuffer.length} bytes`);
 
         while (this.acquirerBuffer.length >= 2) {
             const msgLen = this.acquirerBuffer.readUInt16BE(0);
+            debug('PARSE', `Message length header: ${msgLen}`);
 
             if (msgLen <= 0 || msgLen > 9999) {
+                debug('PARSE', `Invalid message length: ${msgLen}, clearing buffer`);
                 this.acquirerBuffer = Buffer.alloc(0);
                 break;
             }
@@ -328,8 +365,10 @@ class ProxySession {
                 const messageBody = this.acquirerBuffer.slice(2, msgLen + 2);
                 this.acquirerBuffer = this.acquirerBuffer.slice(msgLen + 2);
 
+                debug('PARSE', `Extracted message: ${msgLen} bytes body`, messageBody);
                 this.processAcquirerMessage(fullMessage, messageBody);
             } else {
+                debug('PARSE', `Waiting for more data. Have ${this.acquirerBuffer.length}, need ${msgLen + 2}`);
                 break;
             }
         }
@@ -338,6 +377,8 @@ class ProxySession {
     processAcquirerMessage(fullMessage, messageBody) {
         const msg = parseMessage(messageBody);
         const f = msg.fields;
+
+        debug('MSG', `Parsed message from Acquirer`, { mti: msg.mti, fields: f });
 
         console.log('═'.repeat(70));
         console.log(`[ACQUIRER → REZO] MTI=${msg.mti} RRN=${f[37] || 'N/A'}`);
@@ -365,8 +406,12 @@ class ProxySession {
 
     forwardToIssuer(data) {
         if (this.issuerSocket && !this.issuerSocket.destroyed) {
+            debug('FORWARD', `Sending to Issuer`, data);
             this.issuerSocket.write(data);
             console.log(`[REZO → ISSUER] Forwarded ${data.length} bytes`);
+        } else {
+            debug('FORWARD', `Cannot forward to Issuer - socket not available`);
+            console.log(`[REZO → ISSUER] ERROR: Issuer socket not connected`);
         }
     }
 
@@ -397,6 +442,8 @@ class ProxySession {
         const msg = parseMessage(messageBody);
         const f = msg.fields;
 
+        debug('MSG', `Parsed message from Issuer`, { mti: msg.mti, fields: f });
+
         console.log(`[ISSUER → REZO] MTI=${msg.mti} RRN=${f[37] || 'N/A'} Response=${f[39] || 'N/A'}`);
 
         // Check if this is a response to a pending request
@@ -424,8 +471,12 @@ class ProxySession {
 
     forwardToAcquirer(data) {
         if (this.acquirerSocket && !this.acquirerSocket.destroyed) {
+            debug('FORWARD', `Sending to Acquirer/Postilion`, data);
             this.acquirerSocket.write(data);
             console.log(`[REZO → ACQUIRER] Forwarded ${data.length} bytes`);
+        } else {
+            debug('FORWARD', `Cannot forward to Acquirer - socket not available`);
+            console.log(`[REZO → ACQUIRER] ERROR: Acquirer socket not connected`);
         }
     }
 
@@ -472,6 +523,7 @@ console.log('╠═════════════════════�
 console.log(`║  Listening for Acquirer on:    ${LISTEN_HOST}:${LISTEN_PORT}`.padEnd(69) + '║');
 console.log(`║  Forwarding to Issuer at:      ${ISSUER_HOST}:${ISSUER_PORT}`.padEnd(69) + '║');
 console.log(`║  Blockchain API:               ${REZO_API_URL}`.padEnd(69) + '║');
+console.log(`║  Debug Mode:                   ${DEBUG ? 'ON' : 'OFF'}`.padEnd(69) + '║');
 console.log('╠════════════════════════════════════════════════════════════════════╣');
 console.log('║  POSTILION CONFIG:                                                 ║');
 console.log('║    Connect to:  172.26.40.36:5000 (REZO)                          ║');
