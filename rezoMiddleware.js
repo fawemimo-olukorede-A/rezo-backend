@@ -246,10 +246,10 @@ const pendingTransactions = new Map();
 
 function getTransactionKey(msg) {
     const f = msg.fields;
-    // Use STAN + Transmission DateTime + Amount as unique key
-    // (RRN can be parsed differently in response due to bitmap variations)
-    const key = `${f[11]}-${f[7]}-${f[4]}`;
-    debug('KEY', `Transaction key: ${key}`);
+    // Use STAN only as key - it's consistently parsed in both request and response
+    // Other fields (RRN, Amount) may be parsed differently due to bitmap variations
+    const key = f[11] || 'UNKNOWN';
+    debug('KEY', `Transaction key (STAN): ${key}`);
     return key;
 }
 
@@ -530,8 +530,12 @@ class ProxySession {
             const key = getTransactionKey(msg);
             const pending = pendingTransactions.get(key);
 
+            console.log(`[Match] Looking for STAN=${key}, Found=${pending ? 'YES' : 'NO'}`);
+
             if (pending) {
-                console.log(`[Response] ${RESPONSE_CODES[f[39]] || 'Unknown'} (${f[39]})`);
+                const responseDesc = RESPONSE_CODES[f[39]] || 'Unknown';
+                const isApproved = f[39] === '00' || f[39] === '10' || f[39] === '11';
+                console.log(`[Response] ${isApproved ? '✓' : '✗'} ${responseDesc} (${f[39]})`);
 
                 // *** THIS IS THE KEY MOMENT ***
                 // Both request and response are now available
@@ -541,8 +545,7 @@ class ProxySession {
                 pendingTransactions.delete(key);
             } else {
                 console.log(`[Response] No matching request found`);
-                debug('MATCH', `Looking for key: ${key}`);
-                debug('MATCH', `Available keys: ${Array.from(pendingTransactions.keys()).join(', ')}`);
+                console.log(`[Match] Available STANs: ${Array.from(pendingTransactions.keys()).join(', ') || 'none'}`);
             }
         }
 
